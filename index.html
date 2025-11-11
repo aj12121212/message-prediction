@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <title>Love Theorem Chat Predictor — Fixed Charts</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#f5f8fc; --card:#fff; --muted:#64748b; --accent:#0ea5b7;
+      --good:#10b981; --warn:#f59e0b; --bad:#ef4444;
+    }
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:#022;margin:0;padding:0}
+    header{background:#042f3f;color:#e6f7ff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
+    .wrap{max-width:1000px;margin:18px auto;padding:16px}
+    .card{background:var(--card);border-radius:12px;padding:14px;margin:12px 0;box-shadow:0 8px 24px rgba(2,6,23,0.06)}
+    label{display:block;font-weight:700;margin-top:8px}
+    input[type=file], input[type=text]{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef6;box-sizing:border-box}
+    button{background:var(--accent);color:white;border:none;padding:10px 12px;border-radius:8px;cursor:pointer}
+    .small{font-size:13px;color:var(--muted)}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #eef2f7;text-align:left}
+    .meter{height:14px;border-radius:999px;background:#eef6f8;overflow:hidden}
+    .meter > div{height:100%}
+    canvas{display:block;width:100% !important;height:260px !important}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;color:#e6f2f1;padding:8px;border-radius:8px}
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Love Theorem Predictor</strong></div>
+    <div class="small">Love = 50 + R + E + M + C — Upload WhatsApp .txt (recommended) or .pdf</div>
+  </header>
+
+  <div class="wrap">
+    <div class="card" style="display:grid;grid-template-columns:1fr 360px;gap:12px">
+      <div>
+        <label>1) Upload chat file (.txt recommended, PDF supported)</label>
+        <input id="file" type="file" accept="application/pdf,text/plain" />
+        <label>2) Target name (jiski interest check karna hai)</label>
+        <input id="target" placeholder="e.g., Priya (partial/complete name)" />
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button id="analyze">Predict Love</button>
+          <button id="downloadJson" style="display:none">Download JSON</button>
+        </div>
+        <div id="status" class="small" style="margin-top:10px">Choose file and click <strong>Predict Love</strong>.</div>
+
+        <div class="card" style="margin-top:12px">
+          <strong>Components explanation</strong>
+          <ul class="small">
+            <li><strong>R</strong> — Reply-time (0–30). Jaldi reply → zyada.</li>
+            <li><strong>E</strong> — Emoji usage (0–20).</li>
+            <li><strong>M</strong> — Message balance (0–20) between target & you.</li>
+            <li><strong>C</strong> — Consistency (0–20) across days.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div>
+        <div class="card" style="margin:0">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div><strong>Parsed preview</strong><div class="small">(first 25 parsed lines)</div></div>
+            <div id="badge" class="small" style="background:#eef6f8;padding:6px;border-radius:999px">Love —</div>
+          </div>
+          <div id="preview" style="margin-top:8px;max-height:340px;overflow:auto"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="report" class="card" style="display:none"></div>
+  </div>
+
+  <!-- pdf.js + worker -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script> if(window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js'; </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <script>
+  // ---------- helpers ----------
+  const setStatus = (m,err=false)=>{ const s=document.getElementById('status'); s.textContent=m; s.style.color = err? '#b91c1c' : '#022'; console.log(m); };
+  const esc = s => (s||'').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  function countEmojis(text){ try{ return (text.match(/(\p{Emoji_Presentation}|\p{Emoji}\uFE0F)/gu)||[]).length }catch(e){ return 0; } }
+  function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+  // ---------- parsing ----------
+  const patterns = [
+    /(\d{1,2}[\/\-\.\s]\d{1,2}[\/\-\.\s]\d{2,4}),?\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APMapm]{2})?)\s*-\s*([^:]+):\s*(.*)$/,
+    /(\d{1,2}[\/\-\.\s]\d{1,2}[\/\-\.\s]\d{2,4})\s+(\d{1,2}:\d{2})\s*-\s*([^:]+):\s*(.*)$/,
+    /^\[?(\d{1,2}:\d{2})\]?\s*-?\s*([^:]+):\s*(.*)$/,
+    /^([^:]{1,140}):\s*(.*)$/
+  ];
+
+  function tryParseDate(ds, ts){
+    if(!ds && !ts) return null;
+    const tries = [];
+    if(ds && ts) tries.push(ds + ' ' + ts);
+    if(ds) tries.push(ds);
+    if(ds) tries.push(ds.replace(/\./g,'/'));
+    const parts = (ds||'').match(/\d+/g) || [];
+    if(parts.length>=3) tries.push([parts[1],parts[0],parts[2]].join('/') + (ts?(' '+ts):''));
+    for(const t of tries){ const v = Date.parse(t); if(!isNaN(v)) return new Date(v); }
+    const v2 = Date.parse((ds||'') + ' ' + (ts||''));
+    return isNaN(v2) ? null : new Date(v2);
+  }
+
+  async function pdfToText(file){
+    if(!window.pdfjsLib) throw new Error('pdfjsLib missing — open via local server.');
+    const ab = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data:ab}).promise;
+    let out = '';
+    for(let i=1;i<=pdf.numPages;i++){
+      const page = await pdf.getPage(i);
+      const tc = await page.getTextContent();
+      out += tc.items.map(it => it.str).join(' ') + '\n';
+    }
+    return out;
+  }
+  async function txtToText(file){ return await file.text(); }
+
+  function parseMessages(text){
+    const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+    const msgs = []; let last = null;
+    for(let i=0;i<lines.length;i++){
+      const ln = lines[i];
+      let matched=false;
+      for(const p of patterns){
+        const m = ln.match(p);
+        if(m){
+          matched=true;
+          let ds=null, ts=null, name='', msg='';
+          if(m.length>=4){
+            if(/\d[\/\-\.\s]\d/.test(m[1]) && /\d:\d/.test(m[2])){
+              ds = m[1]; ts = m[2]; name = m[3].trim(); msg = (m[4]||'').trim();
+            } else {
+              if(/\d:\d/.test(m[1])){ ts = m[1]; name = m[2].trim(); msg = (m[3]||'').trim(); }
+              else { name = m[1].trim(); msg = (m[2]||'').trim(); }
+            }
+          }
+          const tsObj = tryParseDate(ds, ts);
+          msgs.push({ts: tsObj, name, text: msg, rawIndex: i});
+          last = msgs[msgs.length-1];
+          break;
+        }
+      }
+      if(!matched){
+        if(last) last.text += ' ' + ln;
+        else msgs.push({ts:null, name:'', text:ln, rawIndex:i});
+      }
+    }
+    return msgs;
+  }
+
+  // ---------- Love theorem computation ----------
+  function computeLove(msgs, targetName){
+    const targetNorm = (targetName||'').toLowerCase().trim();
+    const parts = {}; let totalChars=0, totalEmojis=0;
+    const hourly = Array.from({length:24}, ()=>0);
+
+    for(const m of msgs){
+      const n = (m.name||'').trim() || '[unknown]';
+      if(!parts[n]) parts[n] = {name:n, count:0, chars:0, emojis:0, replyTimes:[], initiations:0, days:new Set()};
+      parts[n].count++;
+      parts[n].chars += (m.text||'').length; totalChars += (m.text||'').length;
+      const em = countEmojis(m.text||''); parts[n].emojis += em; totalEmojis += em;
+      if(m.ts) hourly[new Date(m.ts).getHours()]++;
+      if(m.ts){ const d = new Date(m.ts); parts[n].days.add(d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate()); }
+    }
+
+    // segments => initiations
+    let seg = null; const segments = [];
+    for(let i=0;i<msgs.length;i++){
+      const m = msgs[i];
+      if(!seg) seg = {startBy: (m.name||'').trim(), msgs:[m]};
+      else {
+        const prev = msgs[i-1];
+        let gap = 0;
+        if(prev.ts && m.ts) gap = (m.ts - prev.ts)/(1000*60);
+        if(gap > 30){ segments.push(seg); seg = {startBy:(m.name||'').trim(), msgs:[m]}; }
+        else seg.msgs.push(m);
+      }
+    }
+    if(seg) segments.push(seg);
+    for(const s of segments){ if(parts[s.startBy]) parts[s.startBy].initiations++; }
+
+    // reply times (A->B then B gets reply time)
+    for(let i=0;i<msgs.length-1;i++){
+      const a = msgs[i], b = msgs[i+1];
+      if(a.ts && b.ts && (a.name||'').trim() !== (b.name||'').trim()){
+        const mins = (b.ts - a.ts)/(1000*60);
+        const bn = (b.name||'').trim();
+        if(parts[bn]) parts[bn].replyTimes.push(mins);
+      }
+    }
+
+    // find target key
+    const targetKey = Object.keys(parts).find(k => k.toLowerCase().includes(targetNorm) || (targetNorm && k.toLowerCase()===targetNorm)) || null;
+    if(!targetKey) return {parts, hourly, targetKey:null};
+
+    const t = parts[targetKey];
+    const avgReply = (t.replyTimes.length) ? (t.replyTimes.reduce((a,b)=>a+b,0)/t.replyTimes.length) : null;
+
+    // R mapping: avgReply -> 0..30
+    let R = 0;
+    if(avgReply === null) R = 0;
+    else if(avgReply < 2) R = 30;
+    else if(avgReply < 10) R = 25;
+    else if(avgReply < 30) R = 20;
+    else if(avgReply < 60) R = 10;
+    else R = 0;
+
+    // E: emoji score 0..20
+    const E = Math.min(20, t.emojis * 3);
+
+    // M: message balance vs 'you' (most frequent other)
+    const others = Object.keys(parts).filter(k=>k!==targetKey);
+    const youKey = others.length ? others.sort((a,b)=>parts[b].count - parts[a].count)[0] : null;
+    const youCount = youKey ? parts[youKey].count : 1;
+    const ratio = t.count / (youCount || 1);
+    // map: ratio 0 ->0, 0.5->5,1->10,1.5->15,2+->20
+    let M = Math.round(clamp((Math.min(ratio,2) / 2) * 20, 0, 20));
+
+    // C: consistency days
+    const allDates = msgs.filter(m=>m.ts).map(m=>new Date(m.ts));
+    const spanDays = allDates.length ? Math.max(1, Math.ceil((Math.max(...allDates.map(d=>d.getTime())) - Math.min(...allDates.map(d=>d.getTime())))/(1000*60*60*24))) : 1;
+    const activeDays = t.days.size;
+    const C = Math.round(clamp((activeDays / spanDays) * 20, 0, 20));
+
+    const loveRaw = 50 + R + E + M + C; // as given
+    const lovePercent = Math.round(clamp(((loveRaw - 50) / (140 - 50)) * 100, 0, 100));
+
+    // build participant summary
+    const summary = {};
+    for(const k of Object.keys(parts)){
+      const p = parts[k];
+      const avgR = p.replyTimes.length ? Math.round((p.replyTimes.reduce((a,b)=>a+b,0)/p.replyTimes.length)*10)/10 : null;
+      summary[k] = {name:p.name, messages:p.count, emojis:p.emojis, initiations:p.initiations, avgReplyMin:avgR, activeDays:p.days.size, avgLen: p.count?Math.round(p.chars/p.count):0};
+    }
+
+    return {parts, summary, hourly, targetKey, youKey, components:{R,E,M,C}, loveRaw, lovePercent, avgReply};
+  }
+
+  // ---------- charts & UI ----------
+  let chartHour=null, chartShare=null, chartReply=null;
+
+  // helper to ensure canvases have actual drawing size
+  function ensureCanvasSize(canvas){
+    if(!canvas) return;
+    // set width based on parent width but give a fixed pixel height to avoid 0-size rendering
+    const parent = canvas.parentElement;
+    const w = Math.max(400, Math.min(1200, parent.clientWidth || 900));
+    canvas.width = w;
+    canvas.height = 260;
+    // also set inline style to make Chart.js responsive behavior consistent
+    canvas.style.width = '100%';
+    canvas.style.height = '260px';
+  }
+
+  function renderPreview(msgs){
+    const box = document.getElementById('preview'); box.innerHTML = '';
+    const list = msgs.slice(0,25);
+    if(!list.length){ box.innerHTML = '<div class="small">Preview empty — parsing failed or file format different.</div>'; return; }
+    const tbl = document.createElement('table');
+    tbl.innerHTML = '<thead><tr><th>#</th><th>Time</th><th>Name</th><th>Message</th></tr></thead>';
+    const tb = document.createElement('tbody');
+    list.forEach((m,i)=>{ const tr=document.createElement('tr'); tr.innerHTML = `<td>${i+1}</td><td>${m.ts?new Date(m.ts).toLocaleString():''}</td><td>${esc(m.name)}</td><td>${esc((m.text||'').slice(0,140))}${(m.text||'').length>140?'…':''}</td>`; tb.appendChild(tr); });
+    tbl.appendChild(tb); box.appendChild(tbl);
+  }
+
+  function renderResult(res, msgs, target){
+    const root = document.getElementById('report'); root.style.display='block'; root.innerHTML = '';
+    if(!res.targetKey){
+      root.innerHTML = `<div class="small">Target "<strong>${esc(target)}</strong>" parsed participants me nahi mila. Preview check karein (exact name use karen).</div>`;
+      return;
+    }
+
+    root.innerHTML += `<h3>Love Theorem Result — <small>${esc(res.targetKey)}</small></h3>`;
+    root.innerHTML += `<div class="small">Components: <strong>R</strong> (reply-time) <strong>E</strong> (emoji) <strong>M</strong> (message-balance) <strong>C</strong> (consistency)</div>`;
+
+    const comp = res.components;
+    root.innerHTML += `<div style="margin-top:10px"><table><tbody>
+      <tr><td>R (reply-time)</td><td>${comp.R} / 30</td></tr>
+      <tr><td>E (emoji)</td><td>${comp.E} / 20</td></tr>
+      <tr><td>M (message-balance)</td><td>${comp.M} / 20</td></tr>
+      <tr><td>C (consistency)</td><td>${comp.C} / 20</td></tr>
+    </tbody></table></div>`;
+
+    root.innerHTML += `<div style="margin-top:10px" class="card">
+      <div class="small">Love Theorem (raw): <strong>${res.loveRaw}</strong> — Normalized: <strong>${res.lovePercent}%</strong></div>
+      <div style="margin-top:8px" class="meter"><div style="width:${res.lovePercent}%; background:${res.lovePercent>=80? 'var(--good)': res.lovePercent>=55? 'var(--warn)': 'var(--bad)'}"></div></div>
+      <div style="margin-top:8px" class="small"><strong>Verdict:</strong> ${res.lovePercent>=80? 'Haan — strong interest.' : res.lovePercent>=55? 'Maybe — friendly / kuch interest.' : res.lovePercent>=35? 'Shayad nahi — neutral.' : 'Nahin — low interest.'}</div>
+    </div>`;
+
+    // participant table
+    let rows = `<h4 style="margin-top:12px">Participants summary</h4><table><thead><tr><th>Name</th><th>Msgs</th><th>AvgLen</th><th>AvgReply(min)</th><th>Emojis</th><th>ActiveDays</th></tr></thead><tbody>`;
+    Object.keys(res.summary).sort((a,b)=>res.summary[b].messages - res.summary[a].messages).forEach(k=>{ const p=res.summary[k]; rows += `<tr><td>${esc(p.name)}</td><td>${p.messages}</td><td>${p.avgLen}</td><td>${p.avgReplyMin!==null?p.avgReplyMin:'N/A'}</td><td>${p.emojis}</td><td>${p.activeDays}</td></tr>`; });
+    rows += '</tbody></table>';
+    root.innerHTML += rows;
+
+    // charts
+    root.innerHTML += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+      <div class="card" style="margin:0"><strong>Messages by hour</strong><canvas id="hourChart"></canvas></div>
+      <div class="card" style="margin:0"><strong>Message share</strong><canvas id="shareChart"></canvas></div>
+    </div>`;
+
+    const ch = document.getElementById('hourChart'); const cs = document.getElementById('shareChart');
+    ensureCanvasSize(ch); ensureCanvasSize(cs);
+    try{
+      if(chartHour) chartHour.destroy();
+      chartHour = new Chart(ch.getContext('2d'), {
+        type:'bar',
+        data:{ labels:Array.from({length:24},(_,i)=>i+':00'), datasets:[{ label:'Messages', data:res.hourly, backgroundColor:'rgba(6,182,212,0.6)' }] },
+        options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{ y:{ beginAtZero:true } } }
+      });
+    }catch(e){ console.error(e); setStatus('Hour chart error — check console.'); }
+
+    try{
+      const entries = Object.keys(res.summary).map(k=>({k,v:res.summary[k].messages,name:res.summary[k].name})).sort((a,b)=>b.v-a.v);
+      const top = entries.slice(0,6); const others = entries.slice(6).reduce((a,b)=>a+b.v,0);
+      const labels = top.map(t=>t.name); const data = top.map(t=>t.v); if(others>0){ labels.push('Others'); data.push(others); }
+      if(chartShare) chartShare.destroy();
+      chartShare = new Chart(cs.getContext('2d'), {
+        type:'pie',
+        data:{ labels, datasets:[{ data, backgroundColor: labels.map((_,i)=>`hsl(${(i*60)%360} 70% 55%)`) }] },
+        options:{ responsive:true, maintainAspectRatio:false }
+      });
+    }catch(e){ console.error(e); setStatus('Share chart error — check console.'); }
+
+    // reply-time plot
+    const replyData = buildReplyPlot(msgs, res.targetKey);
+    root.innerHTML += `<div class="card" style="margin-top:12px"><strong>Reply-time plot</strong><div class="small">X = your message index, Y = reply minutes. You auto-detected: <strong>${esc(replyData.youName||'(unknown)')}</strong></div><canvas id="replyPlot"></canvas><div id="replyNote" class="small" style="margin-top:6px"></div></div>`;
+    const cr = document.getElementById('replyPlot'); ensureCanvasSize(cr);
+    const note = document.getElementById('replyNote');
+    try{
+      if(chartReply) chartReply.destroy();
+      if(!replyData.points.length){
+        note.textContent = 'Reply-time plot empty — not enough alternating messages detected or auto-detection of "you" failed. Try different target name or check preview.';
+      } else {
+        note.textContent = '';
+        chartReply = new Chart(cr.getContext('2d'), {
+          type:'line',
+          data:{ labels: replyData.points.map(p=>p.x), datasets:[{ label:'Reply minutes', data: replyData.points.map(p=>p.y), borderColor:'#06b6d4', backgroundColor:'rgba(6,182,212,0.12)', fill:true, tension:0.2, pointRadius:4 }] },
+          options:{ responsive:true, maintainAspectRatio:false, scales:{ x:{ title:{display:true,text:'Your message index'}}, y:{ title:{display:true,text:'Reply time (minutes)'} } } }
+        });
+      }
+    }catch(e){ console.error(e); setStatus('Reply plot error — check console.'); }
+
+    // download json
+    document.getElementById('downloadJson').style.display='inline-block';
+    const out = {target:res.targetKey, components:res.components, loveRaw:res.loveRaw, lovePercent:res.lovePercent, summary:res.summary};
+    const jb = new Blob([JSON.stringify(out,null,2)], {type:'application/json'}); const ju = URL.createObjectURL(jb);
+    document.getElementById('downloadJson').onclick = ()=>{ const a=document.createElement('a'); a.href=ju; a.download='love-prediction.json'; a.click(); };
+
+    // badge
+    document.getElementById('badge').textContent = `Love: ${res.loveRaw} (${res.lovePercent}%)`;
+  }
+
+  // build reply plot points
+  function buildReplyPlot(msgs, targetKey){
+    const names = Array.from(new Set(msgs.map(m=> (m.name||'').trim())));
+    const others = names.filter(n=> n!==targetKey);
+    const youName = others.length ? others.sort((a,b)=> msgs.filter(m=>m.name===b).length - msgs.filter(m=>m.name===a).length)[0] : null;
+    const points=[]; let yourIndex=0;
+    for(let i=0;i<msgs.length-1;i++){
+      const a=msgs[i], b=msgs[i+1];
+      if((a.name||'').trim() === youName){
+        yourIndex++;
+        if(b && (b.name||'').trim() === targetKey && a.ts && b.ts){
+          const mins = (b.ts - a.ts)/(1000*60);
+          points.push({x: yourIndex, y: Math.round(mins*10)/10});
+        }
+      }
+    }
+    return {youName, points};
+  }
+
+  // ---------- main ----------
+  document.getElementById('analyze').addEventListener('click', async ()=>{
+    const f = document.getElementById('file').files[0];
+    const target = (document.getElementById('target').value||'').trim();
+    document.getElementById('preview').innerHTML=''; document.getElementById('report').style.display='none';
+    document.getElementById('downloadJson').style.display='none';
+    document.getElementById('badge').textContent = 'Love —';
+    if(!f){ setStatus('Kripya file select karein.', true); return; }
+    setStatus('Reading file — browser me...');
+
+    try{
+      let text = '';
+      if((f.type && f.type === 'application/pdf') || f.name.toLowerCase().endsWith('.pdf')) text = await pdfToText(f);
+      else text = await txtToText(f);
+
+      setStatus('Parsing messages...');
+      const msgs = parseMessages(text);
+      // store for debug
+      window.__LAST_MSGS = msgs;
+      if(!msgs.length){ setStatus('Koi message parse nahi hua — WhatsApp .txt export try karein.', true); return; }
+      renderPreview(msgs);
+      setStatus('Computing Love Theorem...');
+      const res = computeLove(msgs, target);
+      // compute default hourly if missing
+      if(!res.hourly){ res.hourly = Array.from({length:24}, ()=>0); msgs.forEach(m=>{ if(m.ts) res.hourly[new Date(m.ts).getHours()]++; }); }
+      renderResult(res, msgs, target);
+      setStatus('Prediction complete ✅');
+    } catch(err){
+      console.error(err);
+      setStatus('Error: ' + (err.message || err), true);
+    }
+  });
+  </script>
+</body>
+</html>
