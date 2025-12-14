@@ -150,7 +150,4 @@ Agar parser ya prediction me kuch theek nahi lag raha ho, to **8–12 sample lin
 
 ---
 
-**Good luck!** Agar chaho, main abhi aapke liye:
-- `README.md` ko polished English version me bhi de doon, ya  
-- `README.md` ke saath ek `SAMPLE_INPUT.txt` example file bana ke de doon.  
-Batao kaunsa chahiye.
+**Good luck!**
